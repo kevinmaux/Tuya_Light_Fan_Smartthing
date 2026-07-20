@@ -1,0 +1,10 @@
+name: tuya-child-fan
+components:
+  - id: main
+    categories:
+      - name: Fan
+    capabilities:
+      - id: switch
+        version: 1
+      - id: fanSpeed
+        version: 1

@@ -1,0 +1,28 @@
+name: tuya-parent
+components:
+  - id: main
+    capabilities:
+      - id: refresh
+        version: 1
+preferences:
+  - name: deviceIp
+    title: "Device IP Address"
+    description: "Static local IP address of your fan (e.g. 192.168.1.50)"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+  - name: deviceId
+    title: "Tuya Device ID"
+    description: "Your Tuya Device ID (from Tuya Developer Portal)"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+  - name: localKey
+    title: "Tuya Local Key"
+    description: "Your 16-character Local Key"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
