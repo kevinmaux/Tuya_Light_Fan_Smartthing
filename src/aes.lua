@@ -90,10 +90,16 @@ local function shift_rows(state)
 end
 
 local function inv_shift_rows(state)
-  state[1], state[5], state[9], state[13] = state[1], state[13], state[9], state[5]
-  state[2], state[6], state[10], state[14] = state[2], state[14], state[10], state[6]
-  state[3], state[7], state[11], state[15] = state[3], state[15], state[11], state[7]
-  state[4], state[8], state[12], state[16] = state[4], state[16], state[12], state[8]
+  -- FIX: this must right-rotate each row by its shift amount (0/1/2/3) to
+  -- undo shift_rows' left-rotation. The previous version instead swapped
+  -- the 2nd/4th element of every row and left the 1st/3rd untouched --
+  -- which isn't a valid rotation for rows 0, 1, or 3 (only row 2's shift
+  -- amount of 2 happens to be self-inverse). Verified against shift_rows
+  -- with a round-trip test using 16 distinct marker values.
+  state[1], state[5], state[9], state[13]  = state[1], state[5], state[9], state[13]
+  state[2], state[6], state[10], state[14] = state[14], state[2], state[6], state[10]
+  state[3], state[7], state[11], state[15] = state[11], state[15], state[3], state[7]
+  state[4], state[8], state[12], state[16] = state[8], state[12], state[16], state[4]
 end
 
 local function mix_columns(state)

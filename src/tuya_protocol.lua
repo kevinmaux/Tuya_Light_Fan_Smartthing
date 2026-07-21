@@ -70,25 +70,35 @@ function tuya_lan.send_command(parent_device, dps, cmd_override)
   if cmd == 7 then
     local payload_table = {
       devId = prefs.deviceId,
+      gwId = prefs.deviceId,
       uid = prefs.deviceId,
       t = tostring(math.floor(os.time())),
       dps = dps
     }
     payload_str = json.encode(payload_table)
-  elseif cmd == 10 then 
+  elseif cmd == 10 then
     local payload_table = {
       devId = prefs.deviceId,
+      gwId = prefs.deviceId,
       uid = prefs.deviceId,
       t = tostring(math.floor(os.time()))
     }
     payload_str = json.encode(payload_table)
   end
-  
+
   local data_payload = ""
   if payload_str ~= "" then
     local ciphertext = aes.encrypt_ecb(payload_str, prefs.localKey)
-    local protocol_header = "3.3" .. string.rep("\0", 12)
-    data_payload = protocol_header .. ciphertext
+    if cmd == 7 then
+      -- FIX: the "3.3" + 12-null version header is only added for CONTROL
+      -- (cmd 7). DP_QUERY (10) and HEART_BEAT (9) must NOT have it -- the
+      -- previous version added it unconditionally to any non-empty
+      -- payload, which corrupted every DP_QUERY (status refresh) request.
+      local protocol_header = "3.3" .. string.rep("\0", 12)
+      data_payload = protocol_header .. ciphertext
+    else
+      data_payload = ciphertext
+    end
   end
 
   local prefix = 0x000055AA
