@@ -31,3 +31,13 @@ preferences:
     definition:
       stringType: text
       default: "localkeytochange"
+  - name: protocolVersion
+    title: "Tuya Protocol Version"
+    description: "Local LAN protocol version reported by your device (check with a tool like tinytuya's scan). 3.4 is not yet supported."
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        v33: "3.3"
+        v35: "3.5"
+      default: v33

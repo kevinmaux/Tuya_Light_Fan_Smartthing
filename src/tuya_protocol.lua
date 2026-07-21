@@ -1,14 +1,12 @@
--- src/tuya_protocol.lua
 local socket = require("cosock.socket")
-local cosock = require("cosock")
 local json = require("dkjson")
 local aes = require("aes")
+local tuya35 = require("tuya35")
 local capabilities = require("st.capabilities")
 local log = require("log")
 
 local tuya_lan = {}
 local sequence_num = 1
-local tcp_sockets = {}
 
 local function calculate_crc32(data)
   local crc = 0xFFFFFFFF
@@ -23,34 +21,19 @@ local function calculate_crc32(data)
   return ~crc & 0xFFFFFFFF
 end
 
-local function decrypt_payload(payload_data, key)
-  -- FIX: per Tuya's own embedded SDK (lan_protocol.h), packets the DEVICE
-  -- sends use LAN_PRO_HEAD_GW_S, which has a 4-byte ret_code immediately
-  -- after the header -- unlike LAN_PRO_HEAD_APP_S (what we send), which
-  -- doesn't. Confirmed against tinytuya's unpack_message(), which defaults
-  -- no_retcode=False (i.e. always strips 4 bytes) for protocol < 3.5.
-  -- Without stripping this first, payload_data's length is never a
-  -- multiple of 16 and aes.decrypt_ecb() silently returns nil every time.
-  if #payload_data >= 4 then
-    payload_data = payload_data:sub(5)
-  end
+local function pkcs7_pad(str)
+  local block_size = 16
+  local pad_len = block_size - (#str % block_size)
+  return str .. string.rep(string.char(pad_len), pad_len)
+end
 
-  if payload_data:sub(1, 3) == "3.3" then
-    payload_data = payload_data:sub(16)
-  end
-  
-  local ok, decrypted = pcall(aes.decrypt_ecb, payload_data, key)
-  if not ok or not decrypted then return nil end
-  
-  local pad = string.byte(decrypted, #decrypted)
-  if pad and pad > 0 and pad <= 16 then
-    return decrypted:sub(1, #decrypted - pad)
-  end
-  return decrypted
+local function encrypt_payload(payload_str, local_key)
+  local padded = pkcs7_pad(payload_str)
+  return aes.encrypt_ecb(padded, local_key)
 end
 
 function tuya_lan.process_incoming_dps(parent_device, dps)
-  if not parent_device or type(dps) ~= "table" then return end
+  if not parent_device or not dps then return end
 
   local light_child, fan_child = nil, nil
   for _, child in ipairs(parent_device:get_child_list()) do
@@ -73,133 +56,172 @@ function tuya_lan.process_incoming_dps(parent_device, dps)
   end
 end
 
-function tuya_lan.send_command(parent_device, dps, cmd_override)
-  local prefs = parent_device.preferences
-  local cmd = cmd_override or 7
-  
-  local payload_str = ""
-  if cmd == 7 then
-    local payload_table = {
-      devId = prefs.deviceId,
-      gwId = prefs.deviceId,
-      uid = prefs.deviceId,
-      t = tostring(math.floor(os.time())),
-      dps = dps
-    }
-    payload_str = json.encode(payload_table)
-  elseif cmd == 10 then
-    local payload_table = {
-      devId = prefs.deviceId,
-      gwId = prefs.deviceId,
-      uid = prefs.deviceId,
-      t = tostring(math.floor(os.time()))
-    }
-    payload_str = json.encode(payload_table)
-  end
+--------------------------------------------------------------------------------
+-- Protocol 3.3: plain AES-128-ECB, single fire-and-forget packet.
+--------------------------------------------------------------------------------
+local function pack_message_33(dev_id, local_key, dps)
+  local payload_table = {
+    devId = dev_id,
+    gwId = dev_id,
+    uid = dev_id,
+    t = tostring(math.floor(os.time())),
+    dps = dps
+  }
 
-  local data_payload = ""
-  if payload_str ~= "" then
-    local ciphertext = aes.encrypt_ecb(payload_str, prefs.localKey)
-    if cmd == 7 then
-      -- FIX: the "3.3" + 12-null version header is only added for CONTROL
-      -- (cmd 7). DP_QUERY (10) and HEART_BEAT (9) must NOT have it -- the
-      -- previous version added it unconditionally to any non-empty
-      -- payload, which corrupted every DP_QUERY (status refresh) request.
-      local protocol_header = "3.3" .. string.rep("\0", 12)
-      data_payload = protocol_header .. ciphertext
-    else
-      data_payload = ciphertext
-    end
-  end
+  local payload_str = json.encode(payload_table)
+  local ciphertext = encrypt_payload(payload_str, local_key)
+
+  -- Protocol 3.3 header prefix for port 6668
+  local protocol_header = "3.3" .. string.rep("\0", 12)
+  local data_payload = protocol_header .. ciphertext
 
   local prefix = 0x000055AA
+  local command = 0x00000007 -- CONTROL
   local length = #data_payload + 8
-  
-  local header = string.pack(">I4I4I4I4", prefix, sequence_num, cmd, length)
-  sequence_num = (sequence_num + 1) % 0x100000000
-  
+
+  local header = string.pack(">I4I4I4I4", prefix, sequence_num, command, length)
+  sequence_num = (sequence_num + 1) % 0xFFFFFFFF
+
   local buffer_without_crc = header .. data_payload
   local crc = calculate_crc32(buffer_without_crc)
   local suffix = 0x0000AA55
-  local packet = buffer_without_crc .. string.pack(">I4I4", crc, suffix)
-  
-  local sock = tcp_sockets[parent_device.id]
-  if sock then
-    sock:send(packet)
-  else
-    log.error("Socket offline. Reconnecting to " .. tostring(prefs.deviceIp))
-    tuya_lan.connect(parent_device)
-  end
+
+  return buffer_without_crc .. string.pack(">I4I4", crc, suffix)
 end
 
-local function socket_listener(parent_device)
-  local sock = tcp_sockets[parent_device.id]
-  local prefs = parent_device.preferences
-  
-  while true do
-    if not sock then break end
-    
-    local header, err = sock:receive(16)
-    if err == "timeout" then
-      tuya_lan.send_command(parent_device, nil, 9)
-    elseif err then
-      log.error("Socket error: " .. tostring(err))
-      sock:close()
-      tcp_sockets[parent_device.id] = nil
-      cosock.socket.sleep(5)
-      tuya_lan.connect(parent_device)
-      break
-    elseif header then
-      local prefix, seq, cmd, length = string.unpack(">I4I4I4I4", header)
-      if prefix == 0x000055AA then
-        local remainder = sock:receive(length)
-        if remainder and #remainder == length then
-          local payload_data = remainder:sub(1, length - 8)
-          local crc_received, suffix_received = string.unpack(">I4I4", remainder:sub(length - 7, length))
-          local crc_computed = calculate_crc32(header .. payload_data)
+local function send_33(tcp, dev_id, key, dps)
+  local packet = pack_message_33(dev_id, key, dps)
+  tcp:send(packet)
+  return true
+end
 
-          if crc_received ~= crc_computed then
-            log.warn(string.format("Tuya packet CRC mismatch (got %08x, expected %08x) -- discarding", crc_received, crc_computed))
-          elseif suffix_received ~= 0x0000AA55 then
-            log.warn("Tuya packet has bad suffix -- discarding")
-          elseif (cmd == 8 or cmd == 10) and #payload_data > 0 then
-            local cleartext = decrypt_payload(payload_data, prefs.localKey)
-            if cleartext then
-              local parsed = json.decode(cleartext, 1, nil)
-              if parsed and parsed.dps then
-                tuya_lan.process_incoming_dps(parent_device, parsed.dps)
-              end
-            end
-          end
-        end
-      end
+--------------------------------------------------------------------------------
+-- Protocol 3.5: session-key negotiation (HMAC-SHA256) + AES-128-GCM framed
+-- messages (0x6699 prefix). See tuya35.lua for the wire-format details.
+--------------------------------------------------------------------------------
+local function recv_exact(tcp, n)
+  local buf = {}
+  local have = 0
+  while have < n do
+    local chunk, err = tcp:receive(n - have)
+    if not chunk or #chunk == 0 then
+      return nil, err or "connection closed"
     end
+    buf[#buf + 1] = chunk
+    have = have + #chunk
   end
+  return table.concat(buf)
 end
 
-function tuya_lan.connect(parent_device)
-  local prefs = parent_device.preferences
-  local ip = prefs.deviceIp
-  if not ip or ip == "" or not prefs.deviceId then return end
-  
-  if tcp_sockets[parent_device.id] then
-    tcp_sockets[parent_device.id]:close()
+local function recv_6699_frame(tcp)
+  local header, err = recv_exact(tcp, 18)
+  if not header then return nil, err end
+  local prefix, _unknown, _seqno, _cmd, length = string.unpack(">IHIII", header)
+  if prefix ~= 0x00006699 then
+    return nil, string.format("unexpected frame prefix 0x%08X", prefix)
   end
-  
-  local tcp = socket.tcp()
-  tcp:settimeout(5)
-  
-  local success, err = tcp:connect(ip, 6668)
-  if success then
-    tcp_sockets[parent_device.id] = tcp
-    log.info("LAN Connection established to Tuya device: " .. ip)
-    
-    cosock.spawn(function() socket_listener(parent_device) end)
-    tuya_lan.send_command(parent_device, nil, 10)
-  else
-    log.error("Failed to connect: " .. tostring(err))
+  local rest, err2 = recv_exact(tcp, length + 4) -- body (iv+ciphertext+tag) + suffix
+  if not rest then return nil, err2 end
+  return header .. rest
+end
+
+-- Negotiates a fresh session key on an already-connected socket and sends
+-- one CONTROL_NEW command over it. A new negotiation is performed for every
+-- command (matches the driver's existing "one connection per command"
+-- design), which keeps the state machine simple at the cost of one extra
+-- round-trip per command.
+local function send_35(tcp, dev_id, key, dps)
+  local pkt1, local_nonce = tuya35.negotiate_step1(0, key)
+  tcp:send(pkt1)
+
+  local frame2, err = recv_6699_frame(tcp)
+  if not frame2 then
+    return nil, "no session key response from device: " .. tostring(err)
+  end
+
+  local _seqno2, cmd2, _retcode2, payload2, uerr = tuya35.unpack(frame2, key)
+  if not payload2 then
+    return nil, "failed to decrypt session key response (wrong local key?): " .. tostring(uerr)
+  end
+  if cmd2 ~= tuya35.CMD.SESS_KEY_NEG_RESP then
+    return nil, "unexpected response cmd " .. tostring(cmd2) .. " during session negotiation"
+  end
+
+  local finish_payload, remote_nonce, negerr = tuya35.negotiate_step3(payload2, local_nonce, key)
+  if not finish_payload then
+    return nil, "session key negotiation failed: " .. tostring(negerr)
+  end
+
+  local pkt3 = tuya35.pack(1, tuya35.CMD.SESS_KEY_NEG_FINISH, finish_payload, key, nil)
+  tcp:send(pkt3)
+
+  local session_key = tuya35.negotiate_finalize(local_nonce, remote_nonce, key)
+
+  local payload_table = {
+    devId = dev_id,
+    uid = dev_id,
+    t = tostring(math.floor(os.time())),
+    dps = dps
+  }
+  local payload_str = json.encode(payload_table)
+  local version_header = "3.5" .. string.rep("\0", 12)
+  local cmd_packet = tuya35.pack(2, tuya35.CMD.CONTROL_NEW, payload_str, session_key, version_header)
+  tcp:send(cmd_packet)
+
+  return true
+end
+
+--------------------------------------------------------------------------------
+-- Entry point. `version` is the device's Tuya protocol version string, e.g.
+-- "3.3" or "3.5" (as reported by a tool like tinytuya's scan/version check).
+-- Defaults to "3.3" for backward compatibility with existing installs.
+--------------------------------------------------------------------------------
+function tuya_lan.send_command(ip, dev_id, key, dps, version)
+  version = version or "3.3"
+
+  if #key ~= 16 then
+    log.error(string.format(
+      "Tuya Local Key must be exactly 16 characters (got %d). Check that Device ID and Local Key preferences aren't swapped.",
+      #key))
+    return false
+  end
+
+  local ok, err = pcall(function()
+    local tcp = socket.tcp()
+    tcp:settimeout(3)
+
+    local success, connect_err = tcp:connect(ip, 6668)
+    if not success then
+      log.error(string.format("Tuya LAN Connection failed to %s: %s", ip, tostring(connect_err)))
+      tcp:close()
+      return false
+    end
+
+    local send_ok, send_err
+    if version == "3.5" then
+      send_ok, send_err = send_35(tcp, dev_id, key, dps)
+    elseif version == "3.3" then
+      send_ok, send_err = send_33(tcp, dev_id, key, dps)
+    else
+      tcp:close()
+      error("Unsupported Tuya protocol version: " .. tostring(version) .. " (supported: 3.3, 3.5)")
+    end
+
     tcp:close()
+
+    if not send_ok then
+      log.error("Tuya command failed: " .. tostring(send_err))
+      return false
+    end
+    return true
+  end)
+
+  if not ok then
+    log.error(string.format("Tuya socket execution error: %s", tostring(err)))
+    return false
   end
+
+  return ok
 end
 
 return tuya_lan
