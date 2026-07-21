@@ -1,41 +1,39 @@
+-- src/init.lua
 local Driver = require("st.driver")
 local capabilities = require("st.capabilities")
 local handlers = require("command_handlers")
+local tuya = require("tuya_protocol")
 local log = require("log")
 
--- 1. Discovery Handler
+local PARENT_DNI = "tuya_parent_controller"
+
 local function discovery_handler(driver, _, should_continue)
   log.info("--> LAN Discovery triggered by SmartThings App scan.")
-
-  local unique_dni = "tuya_parent_" .. os.time()
+  for _, dev in ipairs(driver:get_devices()) do
+    if dev.parent_assigned_child_key == nil then
+      log.info("Parent device already exists. Skipping creation.")
+      return
+    end
+  end
 
   local parent_metadata = {
     type = "LAN",
-    device_network_id = unique_dni,
+    device_network_id = PARENT_DNI,
     label = "Tuya Light & Fan Controller",
     vendor_provided_label = "Tuya Light & Fan Controller",
     profile = "tuya-parent",
     manufacturer = "Tuya Custom",
     model = "WMC500-LV"
   }
-
-  log.info("Creating Parent container device...")
   driver:try_create_device(parent_metadata)
 end
 
--- 2. Device Init Handler (Emits default states so tiles become active immediately)
 local function device_init(driver, device)
-  if device.parent_assigned_child_key == "light" then
-    device:emit_event(capabilities.switch.switch.off())
-    device:emit_event(capabilities.switchLevel.level(100))
-    device:emit_event(capabilities.colorTemperature.colorTemperature(2700))
-  elseif device.parent_assigned_child_key == "fan" then
-    device:emit_event(capabilities.switch.switch.off())
-    device:emit_event(capabilities.fanSpeed.fanSpeed(1))
+  if device.parent_assigned_child_key == nil then
+    tuya.connect(device)
   end
 end
 
--- 3. Lifecycle Handler: Triggered when IP/ID/Key settings are saved
 local function info_changed(driver, device, event, args)
   log.info("--> Settings updated on device: " .. tostring(device.label))
 
@@ -45,10 +43,9 @@ local function info_changed(driver, device, event, args)
     local key = device.preferences.localKey
 
     if ip and devId and key and #ip > 0 and #devId > 0 and #key > 0 then
-      log.info("Tuya credentials detected! Spawning child endpoints...")
-
       local child_list = device:get_child_list()
       if #child_list == 0 then
+        log.info("Tuya credentials detected! Spawning child endpoints...")
         driver:try_create_device({
           type = "EDGE_CHILD",
           parent_assigned_child_key = "light",
@@ -58,7 +55,6 @@ local function info_changed(driver, device, event, args)
           model = "WMC500-Light",
           label = "Ceiling Light"
         })
-
         driver:try_create_device({
           type = "EDGE_CHILD",
           parent_assigned_child_key = "fan",
@@ -68,11 +64,10 @@ local function info_changed(driver, device, event, args)
           model = "WMC500-Fan",
           label = "Ceiling Fan"
         })
-      else
-        log.info("Child endpoints already exist. Settings saved successfully.")
       end
+      tuya.connect(device)
     else
-      log.warn("Parent settings incomplete. Please fill in Device IP, Device ID, and Local Key.")
+      log.warn("Parent settings incomplete. Check Device IP, ID, and Key.")
     end
   end
 end
