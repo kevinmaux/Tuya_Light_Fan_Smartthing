@@ -20,15 +20,11 @@ local function calculate_crc32(data)
   return ~crc & 0xFFFFFFFF
 end
 
-local function pkcs7_pad(str)
-  local block_size = 16
-  local pad_len = block_size - (#str % block_size)
-  return str .. string.rep(string.char(pad_len), pad_len)
-end
-
+-- aes.encrypt_ecb already applies PKCS7 padding internally.
+-- Padding here a second time would corrupt the payload (see explanation),
+-- so this function now just delegates straight to the AES module.
 local function encrypt_payload(payload_str, local_key)
-  local padded = pkcs7_pad(payload_str)
-  return aes.encrypt_ecb(padded, local_key)
+  return aes.encrypt_ecb(payload_str, local_key)
 end
 
 function tuya_lan.process_incoming_dps(parent_device, dps)
