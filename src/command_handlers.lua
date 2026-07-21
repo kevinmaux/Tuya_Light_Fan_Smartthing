@@ -33,13 +33,29 @@ local function get_parent_and_config(device)
   return parent, prefs
 end
 
--- protocolVersion preference stores word-char-only keys (SmartThings enum
--- options can't contain "."), so translate to the dotted version string
--- tuya_protocol.lua dispatches on. Defaults to "3.3" if unset (profile not
--- yet updated) for backward compatibility.
-local VERSION_MAP = { v33 = "3.3", v35 = "3.5" }
+-- protocolVersion preference translation now lives in tuya_protocol.lua
+-- (tuya.resolve_version) so it isn't duplicated across files.
 local function get_protocol_version(prefs)
-  return VERSION_MAP[prefs.protocolVersion] or "3.3"
+  return tuya.resolve_version(prefs)
+end
+
+--------------------------------------------------------------------------------
+-- REFRESH: on-demand status query. Works whether triggered from the parent
+-- device or either child — always resolves to the parent's credentials,
+-- queries current dps, and updates both children from the result.
+--------------------------------------------------------------------------------
+function handlers.handle_refresh(driver, device, command)
+  local parent, prefs = get_parent_and_config(device)
+  if not parent then return end
+
+  log.info(string.format("--> Refreshing status from %s", prefs.deviceIp))
+  local dps, err = tuya.query_status(prefs.deviceIp, prefs.deviceId, prefs.localKey, get_protocol_version(prefs))
+  if not dps then
+    log.warn("Tuya refresh failed: " .. tostring(err))
+    return
+  end
+
+  tuya.process_incoming_dps(parent, dps)
 end
 
 --------------------------------------------------------------------------------

@@ -30,7 +30,10 @@ end
 
 local function device_init(driver, device)
   if device.parent_assigned_child_key == nil then
-    tuya.connect(device)
+    local connected = tuya.connect(device)
+    if connected then
+      handlers.handle_refresh(driver, device, {})
+    end
   end
 end
 
@@ -65,7 +68,12 @@ local function info_changed(driver, device, event, args)
           label = "Ceiling Fan"
         })
       end
-      tuya.connect(device)
+      local connected = tuya.connect(device)
+      if connected then
+        -- Pull real current state instead of leaving the hardcoded
+        -- off/100/2700K defaults from device_init in place.
+        handlers.handle_refresh(driver, device, {})
+      end
     else
       log.warn("Parent settings incomplete. Check Device IP, ID, and Key.")
     end
@@ -91,6 +99,9 @@ local tuya_driver = Driver("Tuya_Light_Fan_Smartthing", {
     },
     [capabilities.fanSpeed.ID] = {
       [capabilities.fanSpeed.commands.setFanSpeed.NAME] = handlers.handle_fan_speed,
+    },
+    [capabilities.refresh.ID] = {
+      [capabilities.refresh.commands.refresh.NAME] = handlers.handle_refresh,
     }
   }
 })
