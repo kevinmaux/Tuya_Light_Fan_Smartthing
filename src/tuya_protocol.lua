@@ -162,11 +162,15 @@ local function send_35(tcp, dev_id, key, dps)
 
   local session_key = tuya35.negotiate_finalize(local_nonce, remote_nonce, key)
 
+  -- IMPORTANT: v3.4/3.5 devices use a different payload schema for
+  -- CONTROL_NEW than the old 3.3-style {devId,uid,t,dps} body — they expect
+  -- {"protocol":5,"t":<int>,"data":{"dps":{...}}} with no devId/uid at all
+  -- (the session-encrypted channel already authenticates the device).
+  -- "t" must be a JSON *number*, not a string.
   local payload_table = {
-    devId = dev_id,
-    uid = dev_id,
-    t = tostring(math.floor(os.time())),
-    dps = dps
+    protocol = 5,
+    t = math.floor(os.time()),
+    data = { dps = dps }
   }
   local payload_str = json.encode(payload_table)
   local version_header = "3.5" .. string.rep("\0", 12)
