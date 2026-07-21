@@ -43,7 +43,7 @@ local function key_expansion(key)
   for i = 17, 176, 4 do
     local t = {w[i-4], w[i-3], w[i-2], w[i-1]}
     if (i - 1) % 16 == 0 then
-      t = {SBOX[t[2]+1] ~ RCON[(i-1)//16], SBOX[t[3]+1], SBOX[t[4]+1], SBOX[t[1]+1]}
+      t = {SBOX[t[2]+1] ~ RCON[(i-1)//16 + 1], SBOX[t[3]+1], SBOX[t[4]+1], SBOX[t[1]+1]}
     end
     w[i]   = w[i-16] ~ t[1]
     w[i+1] = w[i-15] ~ t[2]
