@@ -136,7 +136,7 @@ end
 -- design), which keeps the state machine simple at the cost of one extra
 -- round-trip per command.
 local function send_35(tcp, dev_id, key, dps)
-  local pkt1, local_nonce = tuya35.negotiate_step1(0, key)
+  local pkt1, local_nonce = tuya35.negotiate_step1(1, key)
   tcp:send(pkt1)
 
   local frame2, err = recv_6699_frame(tcp)
@@ -157,7 +157,7 @@ local function send_35(tcp, dev_id, key, dps)
     return nil, "session key negotiation failed: " .. tostring(negerr)
   end
 
-  local pkt3 = tuya35.pack(1, tuya35.CMD.SESS_KEY_NEG_FINISH, finish_payload, key, nil)
+  local pkt3 = tuya35.pack(2, tuya35.CMD.SESS_KEY_NEG_FINISH, finish_payload, key, nil)
   tcp:send(pkt3)
 
   local session_key = tuya35.negotiate_finalize(local_nonce, remote_nonce, key)
@@ -170,8 +170,26 @@ local function send_35(tcp, dev_id, key, dps)
   }
   local payload_str = json.encode(payload_table)
   local version_header = "3.5" .. string.rep("\0", 12)
-  local cmd_packet = tuya35.pack(2, tuya35.CMD.CONTROL_NEW, payload_str, session_key, version_header)
+  local cmd_packet = tuya35.pack(3, tuya35.CMD.CONTROL_NEW, payload_str, session_key, version_header)
   tcp:send(cmd_packet)
+
+  -- Wait for the device's reply before closing the socket. Closing
+  -- immediately after send() can cut the connection before a WiFi MCU has
+  -- actually finished processing the packet, silently dropping the command
+  -- even though send() itself reported success. This also tells us whether
+  -- the device actually accepted the command (retcode 0) or rejected it.
+  local frame4, recv_err = recv_6699_frame(tcp)
+  if not frame4 then
+    log.warn("Tuya command sent but no reply from device (command may not have been applied): " .. tostring(recv_err))
+    return true
+  end
+
+  local _seqno4, _cmd4, retcode4, reply_payload = tuya35.unpack(frame4, session_key)
+  if retcode4 and retcode4 ~= 0 then
+    log.warn(string.format("Tuya device replied with non-zero retcode %d: %s", retcode4, tostring(reply_payload)))
+  else
+    log.info("Tuya command acknowledged by device (retcode 0).")
+  end
 
   return true
 end
@@ -272,7 +290,7 @@ function tuya_lan.connect(device)
     end
 
     if version == "3.5" then
-      local pkt1, local_nonce = tuya35.negotiate_step1(0, key)
+      local pkt1, local_nonce = tuya35.negotiate_step1(1, key)
       tcp:send(pkt1)
       local frame2, err = recv_6699_frame(tcp)
       if not frame2 then
