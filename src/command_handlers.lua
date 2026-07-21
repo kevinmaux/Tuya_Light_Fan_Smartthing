@@ -1,71 +1,121 @@
+local log = require("log")
 local capabilities = require("st.capabilities")
-local tuya_lan = require("tuya_lan")
+-- Assuming you have a local tuya socket/protocol helper module
+local tuya = require("tuya_protocol") 
 
-local command_handlers = {}
+local handlers = {}
 
-local function send_to_parent(device, dp_payload)
-  local parent = device:get_parent_device()
-  if parent then
-    local ip = parent.preferences.deviceIp
-    local devId = parent.preferences.deviceId
-    local key = parent.preferences.localKey
-    
-    if ip and devId and key and #ip > 0 and #devId > 0 and #key > 0 then
-      tuya_lan.send_command(ip, devId, key, dp_payload)
-    else
-      device.log.warn("Parent device missing Tuya IP, Device ID, or Local Key in settings.")
-    end
+-- Helper to retrieve parent device reference and Tuya settings
+local function get_parent_and_config(device)
+  local parent = device
+  if device.parent_assigned_child_key ~= nil then
+    parent = device:get_parent_device()
   end
+
+  if not parent then
+    log.error("Failed to acquire parent device!")
+    return nil, nil
+  end
+
+  local prefs = parent.preferences
+  if not (prefs.deviceIp and prefs.deviceId and prefs.localKey) then
+    log.error("Missing Tuya credentials in parent device preferences!")
+    return nil, nil
+  end
+
+  return parent, prefs
 end
 
-function command_handlers.handle_switch_on(driver, device, command)
-  if device.network_id:match(":light") then
-    send_to_parent(device, { ["20"] = true })
-  elseif device.network_id:match(":fan") then
-    send_to_parent(device, { ["60"] = true })
-  end
+--------------------------------------------------------------------------------
+-- SWITCH COMMANDS (DP 20 for Light, DP 60 for Fan)
+--------------------------------------------------------------------------------
+function handlers.handle_switch_on(driver, device, command)
+  local parent, prefs = get_parent_and_config(device)
+  if not parent then return end
+
+  local key = device.parent_assigned_child_key or "light"
+  local dp_id = (key == "fan") and 60 or 20
+
+  log.info(string.format("--> Sending ON to [%s] via DP %d at IP %s", device.label, dp_id, prefs.deviceIp))
+
+  -- Construct and send Tuya Local Command (DP = true)
+  local payload = { [tostring(dp_id)] = true }
+  tuya.send_command(prefs.deviceIp, prefs.deviceId, prefs.localKey, payload)
+
+  -- Update tile state
   device:emit_event(capabilities.switch.switch.on())
 end
 
-function command_handlers.handle_switch_off(driver, device, command)
-  if device.network_id:match(":light") then
-    send_to_parent(device, { ["20"] = false })
-  elseif device.network_id:match(":fan") then
-    send_to_parent(device, { ["60"] = false })
-  end
+function handlers.handle_switch_off(driver, device, command)
+  local parent, prefs = get_parent_and_config(device)
+  if not parent then return end
+
+  local key = device.parent_assigned_child_key or "light"
+  local dp_id = (key == "fan") and 60 or 20
+
+  log.info(string.format("--> Sending OFF to [%s] via DP %d at IP %s", device.label, dp_id, prefs.deviceIp))
+
+  -- Construct and send Tuya Local Command (DP = false)
+  local payload = { [tostring(dp_id)] = false }
+  tuya.send_command(prefs.deviceIp, prefs.deviceId, prefs.localKey, payload)
+
+  -- Update tile state
   device:emit_event(capabilities.switch.switch.off())
 end
 
-function command_handlers.handle_light_level(driver, device, command)
+--------------------------------------------------------------------------------
+-- LIGHT LEVEL / BRIGHTNESS (DP 22: Range 1 - 100)
+--------------------------------------------------------------------------------
+function handlers.handle_light_level(driver, device, command)
+  local parent, prefs = get_parent_and_config(device)
+  if not parent then return end
+
   local level = math.max(1, math.min(100, command.args.level))
-  send_to_parent(device, { ["22"] = level })
+  log.info(string.format("--> Setting Brightness [%d%%] on [%s] (DP 22)", level, device.label))
+
+  local payload = { ["22"] = level }
+  tuya.send_command(prefs.deviceIp, prefs.deviceId, prefs.localKey, payload)
+
   device:emit_event(capabilities.switchLevel.level(level))
 end
 
-function command_handlers.handle_color_temp(driver, device, command)
-  local k_temp = command.args.temperature
-  -- Convert SmartThings Kelvin (2700K - 6500K) to Tuya DP 23 scale (0 - 1000)
-  local tuya_temp = math.floor(((k_temp - 2700) / (6500 - 2700)) * 1000)
-  tuya_temp = math.max(0, math.min(1000, tuya_temp))
-  
-  send_to_parent(device, { ["23"] = tuya_temp })
-  device:emit_event(capabilities.colorTemperature.colorTemperature(k_temp))
+--------------------------------------------------------------------------------
+-- COLOR TEMPERATURE (DP 23: Range 0 - 1000)
+--------------------------------------------------------------------------------
+function handlers.handle_color_temp(driver, device, command)
+  local parent, prefs = get_parent_and_config(device)
+  if not parent then return end
+
+  -- Scale SmartThings Kelvin (e.g. 2700K - 6500K) or % to Tuya's 0-1000 range
+  local st_temp = command.args.temperature
+  local tuya_val = math.floor(((st_temp - 2700) / (6500 - 2700)) * 1000)
+  tuya_val = math.max(0, math.min(1000, tuya_val))
+
+  log.info(string.format("--> Setting Color Temp [%dK -> Tuya: %d] (DP 23)", st_temp, tuya_val))
+
+  local payload = { ["23"] = tuya_val }
+  tuya.send_command(prefs.deviceIp, prefs.deviceId, prefs.localKey, payload)
+
+  device:emit_event(capabilities.colorTemperature.colorTemperature(st_temp))
 end
 
-function command_handlers.handle_fan_speed(driver, device, command)
-  local st_speed = command.args.speed
-  if st_speed == 0 then
-    send_to_parent(device, { ["60"] = false })
-    device:emit_event(capabilities.switch.switch.off())
-  else
-    -- Map ST speeds (1-4) to Tuya speeds (1-6)
-    local tuya_speed_map = { [1] = 1, [2] = 3, [3] = 4, [4] = 6 }
-    local tuya_speed = tuya_speed_map[st_speed] or 1
-    
-    send_to_parent(device, { ["60"] = true, ["62"] = tuya_speed })
-    device:emit_event(capabilities.switch.switch.on())
-  end
-  device:emit_event(capabilities.fanSpeed.fanSpeed(st_speed))
+--------------------------------------------------------------------------------
+-- FAN SPEED (DP 62: Range 1 - 6)
+--------------------------------------------------------------------------------
+function handlers.handle_fan_speed(driver, device, command)
+  local parent, prefs = get_parent_and_config(device)
+  if not parent then return end
+
+  -- SmartThings fan speed range -> Tuya DP 62 range (1 to 6)
+  local raw_speed = command.args.speed
+  local tuya_speed = math.max(1, math.min(6, raw_speed))
+
+  log.info(string.format("--> Setting Fan Speed [%d] on [%s] (DP 62)", tuya_speed, device.label))
+
+  local payload = { ["62"] = tuya_speed }
+  tuya.send_command(prefs.deviceIp, prefs.deviceId, prefs.localKey, payload)
+
+  device:emit_event(capabilities.fanSpeed.fanSpeed(tuya_speed))
 end
 
-return command_handlers
+return handlers

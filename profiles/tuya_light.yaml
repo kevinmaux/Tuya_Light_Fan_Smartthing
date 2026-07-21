@@ -1,12 +1,10 @@
 name: tuya-child-light
 components:
   - id: main
-    categories:
-      - name: Light
     capabilities:
       - id: switch
         version: 1
       - id: switchLevel
         version: 1
-      - id: colorTemperature
-        version: 1
+    categories:
+      - name: Light

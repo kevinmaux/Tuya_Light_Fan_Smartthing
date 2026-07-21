@@ -1,7 +1,8 @@
 name: "Tuya_Light_Fan_Smartthing"
 packageKey: "tuya-light-fan-smartthing"
+version: 6
 description: "Local LAN SmartThings Edge Driver for Tuya Ceiling Fan with Light"
 vendorSupportInformation: "Custom Build"
 permissions:
   lan: {}
-  
+  discovery: {}

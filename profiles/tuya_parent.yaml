@@ -4,6 +4,8 @@ components:
     capabilities:
       - id: refresh
         version: 1
+    categories:
+      - name: Light
 preferences:
   - name: deviceIp
     title: "Device IP Address"
@@ -12,13 +14,15 @@ preferences:
     preferenceType: string
     definition:
       stringType: text
+      default: "iptochange"
   - name: deviceId
     title: "Tuya Device ID"
-    description: "Your Tuya Device ID (from Tuya Developer Portal)"
+    description: "Your Tuya Device ID"
     required: true
     preferenceType: string
     definition:
       stringType: text
+      default: "idtochange"
   - name: localKey
     title: "Tuya Local Key"
     description: "Your 16-character Local Key"
@@ -26,3 +30,4 @@ preferences:
     preferenceType: string
     definition:
       stringType: text
+      default: "localkeytochange"
