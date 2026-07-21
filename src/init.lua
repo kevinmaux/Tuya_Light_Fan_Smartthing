@@ -3,15 +3,27 @@ local capabilities = require("st.capabilities")
 local handlers = require("command_handlers")
 local log = require("log")
 
+-- Stable network id for the single parent controller device.
+-- Must NOT change between scans, or SmartThings will treat it as a new device.
+local PARENT_DNI = "tuya_parent_controller"
+
 -- 1. Discovery Handler
 local function discovery_handler(driver, _, should_continue)
   log.info("--> LAN Discovery triggered by SmartThings App scan.")
-  
-  local unique_dni = "tuya_parent_" .. os.time()
+
+  -- Check whether a parent device has already been created.
+  -- driver:get_devices() returns every device this driver already knows about,
+  -- including ones created in previous scans/sessions.
+  for _, dev in ipairs(driver:get_devices()) do
+    if dev.parent_assigned_child_key == nil then
+      log.info("Parent device already exists (" .. tostring(dev.label) .. "). Skipping creation.")
+      return
+    end
+  end
 
   local parent_metadata = {
     type = "LAN",
-    device_network_id = unique_dni,
+    device_network_id = PARENT_DNI,
     label = "Tuya Light & Fan Controller",
     vendor_provided_label = "Tuya Light & Fan Controller",
     profile = "tuya-parent",
