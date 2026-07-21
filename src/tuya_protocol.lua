@@ -24,6 +24,17 @@ local function calculate_crc32(data)
 end
 
 local function decrypt_payload(payload_data, key)
+  -- FIX: per Tuya's own embedded SDK (lan_protocol.h), packets the DEVICE
+  -- sends use LAN_PRO_HEAD_GW_S, which has a 4-byte ret_code immediately
+  -- after the header -- unlike LAN_PRO_HEAD_APP_S (what we send), which
+  -- doesn't. Confirmed against tinytuya's unpack_message(), which defaults
+  -- no_retcode=False (i.e. always strips 4 bytes) for protocol < 3.5.
+  -- Without stripping this first, payload_data's length is never a
+  -- multiple of 16 and aes.decrypt_ecb() silently returns nil every time.
+  if #payload_data >= 4 then
+    payload_data = payload_data:sub(5)
+  end
+
   if payload_data:sub(1, 3) == "3.3" then
     payload_data = payload_data:sub(16)
   end
@@ -144,8 +155,14 @@ local function socket_listener(parent_device)
         local remainder = sock:receive(length)
         if remainder and #remainder == length then
           local payload_data = remainder:sub(1, length - 8)
-          
-          if (cmd == 8 or cmd == 10) and #payload_data > 0 then
+          local crc_received, suffix_received = string.unpack(">I4I4", remainder:sub(length - 7, length))
+          local crc_computed = calculate_crc32(header .. payload_data)
+
+          if crc_received ~= crc_computed then
+            log.warn(string.format("Tuya packet CRC mismatch (got %08x, expected %08x) -- discarding", crc_received, crc_computed))
+          elseif suffix_received ~= 0x0000AA55 then
+            log.warn("Tuya packet has bad suffix -- discarding")
+          elseif (cmd == 8 or cmd == 10) and #payload_data > 0 then
             local cleartext = decrypt_payload(payload_data, prefs.localKey)
             if cleartext then
               local parsed = json.decode(cleartext, 1, nil)
