@@ -70,7 +70,11 @@ function handlers.handle_light_level(driver, device, command)
   local parent, prefs = get_parent_and_config(device)
   if not parent then return end
 
-  local level = math.max(1, math.min(100, command.args.level))
+  -- math.floor() also normalizes a float arg (e.g. 50.0) to Lua's integer
+  -- subtype, so dkjson emits a clean JSON integer (50) instead of 50.0 --
+  -- DP 22 is typed as an integer "value" and some Tuya firmware parsers
+  -- are strict about this.
+  local level = math.floor(math.max(1, math.min(100, command.args.level)))
   log.info(string.format("--> Setting Brightness [%d%%] on [%s] (DP 22)", level, device.label))
 
   local payload = { ["22"] = level }
@@ -108,7 +112,7 @@ function handlers.handle_fan_speed(driver, device, command)
 
   -- SmartThings fan speed range -> Tuya DP 62 range (1 to 6)
   local raw_speed = command.args.speed
-  local tuya_speed = math.max(1, math.min(6, raw_speed))
+  local tuya_speed = math.floor(math.max(1, math.min(6, raw_speed)))
 
   log.info(string.format("--> Setting Fan Speed [%d] on [%s] (DP 62)", tuya_speed, device.label))
 
