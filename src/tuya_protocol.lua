@@ -8,6 +8,11 @@ local log = require("log")
 local tuya_lan = {}
 local sequence_num = 1
 
+-- protocolVersion preference stores word-char-only keys (SmartThings enum
+-- options can't contain "."); translate to the dotted version string used
+-- internally. Mirrors the same map in command_handlers.lua.
+local VERSION_MAP_FOR_CONNECT = { v33 = "3.3", v35 = "3.5" }
+
 local function calculate_crc32(data)
   local crc = 0xFFFFFFFF
   for i = 1, #data do
@@ -222,6 +227,85 @@ function tuya_lan.send_command(ip, dev_id, key, dps, version)
   end
 
   return ok
+end
+
+--------------------------------------------------------------------------------
+-- Connectivity/credential check, called from init.lua on device init and
+-- infoChanged. Opens a socket to the device and, for protocol 3.5, runs the
+-- full session-key negotiation (the strongest available proof the local key
+-- is correct) — but never sends an actual DP command. Logs the result;
+-- callers don't need the return value, but it's provided (true/false) in
+-- case future code wants to react to it.
+--------------------------------------------------------------------------------
+function tuya_lan.connect(device)
+  local prefs = device.preferences
+  if not prefs then
+    log.warn("Tuya connect check skipped: device has no preferences yet.")
+    return false
+  end
+
+  local ip, dev_id, key = prefs.deviceIp, prefs.deviceId, prefs.localKey
+  local version = VERSION_MAP_FOR_CONNECT[prefs.protocolVersion] or "3.3"
+
+  if not (ip and dev_id and key) or #ip == 0 or #dev_id == 0 or #key == 0
+     or ip == "iptochange" or dev_id == "idtochange" or key == "localkeytochange" then
+    log.info("Tuya connect check skipped: credentials not yet configured.")
+    return false
+  end
+
+  if #key ~= 16 then
+    log.error(string.format(
+      "Tuya connect check failed: Local Key must be exactly 16 characters (got %d) — check that Device ID and Local Key aren't swapped.",
+      #key))
+    return false
+  end
+
+  local ok, result = pcall(function()
+    local tcp = socket.tcp()
+    tcp:settimeout(3)
+
+    local success, connect_err = tcp:connect(ip, 6668)
+    if not success then
+      log.error(string.format("Tuya connect check: failed to reach %s: %s", ip, tostring(connect_err)))
+      tcp:close()
+      return false
+    end
+
+    if version == "3.5" then
+      local pkt1, local_nonce = tuya35.negotiate_step1(0, key)
+      tcp:send(pkt1)
+      local frame2, err = recv_6699_frame(tcp)
+      if not frame2 then
+        log.error("Tuya connect check: no session key response from device: " .. tostring(err))
+        tcp:close()
+        return false
+      end
+      local _seqno2, cmd2, _retcode2, payload2, uerr = tuya35.unpack(frame2, key)
+      if not payload2 or cmd2 ~= tuya35.CMD.SESS_KEY_NEG_RESP then
+        log.error("Tuya connect check: session key negotiation failed (wrong local key?): " .. tostring(uerr))
+        tcp:close()
+        return false
+      end
+      local finish_payload, _remote_nonce, negerr = tuya35.negotiate_step3(payload2, local_nonce, key)
+      if not finish_payload then
+        log.error("Tuya connect check: " .. tostring(negerr))
+        tcp:close()
+        return false
+      end
+      log.info(string.format("Tuya connect check: session key negotiated OK with %s (protocol 3.5).", ip))
+    else
+      log.info(string.format("Tuya connect check: TCP connection to %s OK (protocol 3.3).", ip))
+    end
+
+    tcp:close()
+    return true
+  end)
+
+  if not ok then
+    log.error("Tuya connect check error: " .. tostring(result))
+    return false
+  end
+  return result
 end
 
 return tuya_lan
